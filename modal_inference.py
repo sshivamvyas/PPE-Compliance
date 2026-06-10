@@ -21,13 +21,13 @@ from pathlib import Path
 # ── Image (GPU environment) ──────────────────────────────────────────────────
 
 image = (
-    modal.Image.debian_slim(python="3.11")
+    modal.Image.debian_slim()
+    .run_commands("pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124")
     .pip_install(
         "ultralytics>=8.3.0",
-        "torch>=2.1.0",
-        "torchvision>=0.16.0",
         "opencv-python-headless>=4.8.0",
         "numpy>=1.24.0",
+        "fastapi",
     )
     .apt_install("ffmpeg")
 )
@@ -149,14 +149,18 @@ class PPEDetector:
 
 # ── Upload Models ────────────────────────────────────────────────────────────
 
-@app.function(volumes={MODEL_PATH: MODEL_VOLUME})
+@app.function(
+    volumes={MODEL_PATH: MODEL_VOLUME},
+)
 def upload_models():
-    """Upload both .pt files to Modal Volume. Run once after deploy."""
+    """Upload both .pt files to Modal Volume. Run once after deploy — requires models/ dir to be included in mount."""
     import shutil
 
+    # Models are expected to be mounted alongside this script
+    base = Path(__file__).parent / "models"
     local_models = [
-        "../ppe-deploy-phase/models/baseline_best.pt",
-        "../ppe-deploy-phase/models/best_sam_refined.pt",
+        str(base / "baseline_best.pt"),
+        str(base / "best_sam_refined.pt"),
     ]
 
     for src_path in local_models:
@@ -180,7 +184,7 @@ def upload_models():
     timeout=600,
     allow_concurrent_inputs=1,
 )
-@modal.web_endpoint(method="POST")
+@modal.fastapi_endpoint(method="POST")
 def detect_http(item: dict):
     """
     HTTP endpoint for GPU inference. Dashboard calls this via requests.post().

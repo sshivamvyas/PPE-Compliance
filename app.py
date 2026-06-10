@@ -34,7 +34,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Modal URL (replace after `modal deploy`) ─────────────────────────────────
-MODAL_URL = "https://shivamvyas--ppe-compliance-detect-http.modal.run"
+MODAL_URL = "https://sshivamvyas--ppe-compliance-detect-http.modal.run"
 
 # ── Load Data ────────────────────────────────────────────────────────────────
 @st.cache_data
@@ -239,7 +239,7 @@ st.markdown("---")
 
 st.markdown("### ⚡ Live GPU Inference (Modal T4)")
 
-# MODAL_URL = "https://shivamvyas--ppe-compliance-detect-http.modal.run"
+# MODAL_URL = "https://sshivamvyas--ppe-compliance-detect-http.modal.run"
 # After deploying Modal, replace the URL above with yours from `modal deploy` output.
 
 with st.expander("🔧 Modal Setup (one-time)", expanded=False):
