@@ -1,7 +1,7 @@
 """
-PPE Compliance — Dashboard
-============================
-Pre-computed results + Live GPU inference via Modal T4.
+PPE Compliance — Live Dashboard
+================================
+Upload video → GPU processes with Baseline & SAM-Teacher → compare side-by-side.
 """
 
 import streamlit as st
@@ -21,11 +21,14 @@ st.markdown("""
     .badge-base { background:#e8f0fe; color:#1a73e8; }
     .badge-sam { background:#e6f4ea; color:#137333; }
     .card { background:#1e1e2e; border-radius:12px; padding:20px; border:1px solid #333; color:#e0e0e0; }
-    .card strong { color:#ffffff; }
+    .card strong { color:#ffffff; font-size:0.95rem; }
+    .comply-yes { color:#34a853; font-weight:700; }
+    .comply-no { color:#ea4335; font-weight:700; }
 </style>
 """, unsafe_allow_html=True)
 
 MODAL_URL = "https://sshivamvyas--ppe-compliance-detect-http.modal.run"
+PPE_ITEMS = ["helmet","gloves","vest","boots","goggles"]
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Header
@@ -35,33 +38,51 @@ st.markdown("""
 <div class="hero">
     <h1>🦺 PPE Compliance Tracking System</h1>
     <p>
-        Comparing <span class="badge badge-base">Baseline YOLO11m</span> (trained directly on Construction-PPE)
-        vs <span class="badge badge-sam">SAM-Teacher YOLO11m</span> (9,994 SAM pseudo-labels) — 55% mAP improvement
+        Comparing <span class="badge badge-base">Baseline YOLO11m</span> (trained directly)
+        vs <span class="badge badge-sam">SAM-Teacher YOLO11m</span> (9,994 SAM-refined labels) — <b>55% mAP improvement</b>
     </p>
 </div>
 """, unsafe_allow_html=True)
 
-# ── Sidebar ──────────────────────────────────────────────────────────────────
-st.sidebar.markdown("### 📈 Trained Models")
-st.sidebar.markdown('<span class="badge badge-base">Baseline</span> mAP50: **0.558**', unsafe_allow_html=True)
-st.sidebar.markdown('<span class="badge badge-sam">SAM-Teacher</span> mAP50: **0.864**', unsafe_allow_html=True)
-st.sidebar.markdown("**+55%** with 9,994 SAM pseudo-labels")
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Sidebar
+# ═══════════════════════════════════════════════════════════════════════════════
+
+st.sidebar.markdown("### 📈 Model Performance (Test Set)")
+
+st.sidebar.markdown("""
+| Metric | Baseline | SAM | Δ |
+|--------|:---:|:---:|:---:|
+| mAP50 | 0.558 | **0.864** | +55% |
+| mAP50-95 | 0.281 | **0.710** | +153% |
+| Precision | 0.674 | **0.870** | +29% |
+| Recall | 0.612 | **0.804** | +31% |
+""")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("""
-**How it works:**  
-Upload any video → Modal T4 GPU processes it with both models → instant comparison.
-
-**Deployment:**  
-Streamlit Cloud (free) + Modal GPU (free credits)
+**Both YOLO11m** · 40.5 MB each  
+Baseline: 86 epochs · 1.42 hrs  
+SAM: 100 epochs · 1.44 hrs  
++66 min SAM labeling
 """)
 
-# ── Live GPU ─────────────────────────────────────────────────────────────────
+st.sidebar.markdown("---")
+st.sidebar.markdown("""
+**⚡ Deployment**  
+Streamlit Cloud (free)  
+Modal T4 GPU (free credits)  
+~10 sec per video
+""")
 
-st.markdown("### ⚡ Upload & Detect on GPU")
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Upload & Detect
+# ═══════════════════════════════════════════════════════════════════════════════
 
-video_file = st.file_uploader("Upload video for live GPU processing", type=["mp4","avi","mov","webm"],
-                               help="Both Baseline & SAM-Teacher models run simultaneously on a Modal T4 GPU")
+st.markdown("### 📤 Upload & Detect on GPU")
+
+video_file = st.file_uploader("Upload video for live processing", type=["mp4","avi","mov","webm"],
+                               help="Both models run simultaneously on T4 GPU — no model selection needed")
 
 if video_file:
     if "last_video" not in st.session_state or st.session_state.last_video != video_file.name:
@@ -72,7 +93,7 @@ if video_file:
     st.caption(f"{video_file.name} — {video_file.size/1e6:.1f} MB")
 
     if st.button("🚀 Process on T4 GPU", type="primary", use_container_width=True):
-        with st.spinner("⚡ Running both models on T4 GPU..."):
+        with st.spinner("⚡ Running both models on T4 GPU (~10-15 sec)..."):
             try:
                 video_bytes = video_file.read()
                 resp = requests.post(
@@ -83,37 +104,73 @@ if video_file:
                 if resp.status_code != 200:
                     st.error(f"Modal error: {resp.status_code}")
                 else:
-                    result = resp.json()
-                    if "error" in result:
-                        st.error(f"Modal: {result['error'][:500]}")
+                    data = resp.json()
+                    if "error" in data:
+                        st.error(f"Modal: {data['error'][:500]}")
                     else:
-                        st.session_state.gpu_result = result
-                        st.success(f"✅ {result['results']['baseline']['frames']} frames processed on T4")
+                        st.session_state.gpu_result = data
+                        st.success(f"✅ {data['results']['baseline']['frames']} frames processed on T4 GPU")
                         st.balloons()
             except Exception as e:
                 st.error(f"Connection failed: {e}")
 
-    # Show GPU results
+    # ── Show Results ────────────────────────────────────────────────────
     if "gpu_result" in st.session_state and st.session_state.gpu_result:
         r = st.session_state.gpu_result["results"]
         rb, rs = r["baseline"], r["sam"]
 
-        # KPIs
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Baseline", f"{rb['total_detections']:,}", f"{rb['total_detections']/max(rb['frames'],1):.1f}/frame")
-        c2.metric("SAM-Teacher", f"{rs['total_detections']:,}", f"{rs['total_detections']/max(rs['frames'],1):.1f}/frame")
-        c3.metric("Δ SAM vs Baseline", f"{rs['total_detections']-rb['total_detections']:+,}")
+        # Check if SAM failed
+        if "error" in rs:
+            st.warning(f"SAM model encountered an error: {rs['error'][:200]}")
+            st.stop()
 
-        # Bar chart
+        # ── KPI Row ─────────────────────────────────────────────────────
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Frames", f"{rb['frames']}", f"{video_file.size/1e6:.1f}MB")
+        c2.metric("Baseline Detections", f"{rb['total_detections']:,}",
+                  f"{rb['total_detections']/max(rb['frames'],1):.1f}/frame")
+        c3.metric("SAM-Teacher Detections", f"{rs['total_detections']:,}",
+                  f"{rs['total_detections']/max(rs['frames'],1):.1f}/frame")
+        c4.metric("Δ SAM vs Baseline", f"{rs['total_detections']-rb['total_detections']:+,}")
+
+        st.caption(f"Processed on Modal T4 GPU · Both models same architecture & speed (~85 FPS on GPU)")
+
+        # ── Compliance Summary Cards ─────────────────────────────────────
+        st.markdown("### 🎯 Detection Breakdown: What's Present & Missing")
+
+        def build_compliance(model_name, ct, total_frames):
+            """Build a compliance card showing what PPE is detected vs missing."""
+            rows = []
+            for item in PPE_ITEMS:
+                count = ct.get(item, 0)
+                ratio = count / max(total_frames, 1)
+                status = "✅" if ratio > 0.1 else "⚠️ Not detected"
+                rows.append((item.capitalize(), f"{count:,}", f"{ratio:.1f}/frame", status))
+            return rows
+
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            st.markdown('<span class="badge badge-base">Baseline YOLO11m</span>', unsafe_allow_html=True)
+            rows_b = build_compliance("baseline", rb["class_totals"], rb["frames"])
+            st.dataframe(pd.DataFrame(rows_b, columns=["PPE Item","Detections","Density","Status"]),
+                        hide_index=True, use_container_width=True)
+        with cc2:
+            st.markdown('<span class="badge badge-sam">SAM-Teacher YOLO11m</span>', unsafe_allow_html=True)
+            rows_s = build_compliance("sam", rs["class_totals"], rs["frames"])
+            st.dataframe(pd.DataFrame(rows_s, columns=["PPE Item","Detections","Density","Status"]),
+                        hide_index=True, use_container_width=True)
+
+        # ── Side-by-Side Bar Chart ──────────────────────────────────────
+        st.markdown("### 📊 Per-Class Comparison")
         all_c = sorted(set(list(rb['class_totals'])+list(rs['class_totals'])))
-        df = pd.DataFrame([{"Class":c,"Baseline":rb['class_totals'].get(c,0),"SAM-Teacher":rs['class_totals'].get(c,0)} for c in all_c])
+        df = pd.DataFrame([{"Class":c,"Baseline":rb['class_totals'].get(c,0),"SAM":rs['class_totals'].get(c,0)} for c in all_c])
         fig = go.Figure()
         fig.add_trace(go.Bar(x=df["Class"],y=df["Baseline"],name="Baseline",marker_color="#1a73e8",text=df["Baseline"],textposition="outside"))
-        fig.add_trace(go.Bar(x=df["Class"],y=df["SAM-Teacher"],name="SAM-Teacher",marker_color="#137333",text=df["SAM-Teacher"],textposition="outside"))
+        fig.add_trace(go.Bar(x=df["Class"],y=df["SAM"],name="SAM-Teacher",marker_color="#137333",text=df["SAM"],textposition="outside"))
         fig.update_layout(height=400,barmode="group",margin=dict(l=0,r=0,t=10,b=0))
         st.plotly_chart(fig,use_container_width=True)
 
-        # Side-by-side preview images
+        # ── Annotated Preview ────────────────────────────────────────────
         st.markdown("### 📸 Annotated Preview (first frame)")
         cv1, cv2 = st.columns(2)
         with cv1:
@@ -123,88 +180,34 @@ if video_file:
         with cv2:
             st.markdown('<span class="badge badge-sam">SAM-Teacher</span>', unsafe_allow_html=True)
             if rs.get("preview_b64"):
-                st.image(base64.b64decode(rs["preview_b64"]))
+                st.image(base64.b64decode(rs["preview_b64"]), use_container_width=True)
 
-        # Download buttons
-        st.markdown("### 📥 Download Annotated Videos (first 15 sec)")
+        # ── Event Timeline ──────────────────────────────────────────────
+        st.markdown("### 📈 Detection Timeline")
+        base_ts = [(r["time"], r["detections"]) for r in rb.get("records", []) if r["detections"] > 0]
+        sam_ts = [(r["time"], r["detections"]) for r in rs.get("records", []) if r["detections"] > 0]
+        fig2 = go.Figure()
+        if base_ts:
+            t, d = zip(*base_ts)
+            fig2.add_trace(go.Scatter(x=t,y=d,mode="lines",name="Baseline",line=dict(color="#1a73e8",width=1),opacity=0.7))
+        if sam_ts:
+            t, d = zip(*sam_ts)
+            fig2.add_trace(go.Scatter(x=t,y=d,mode="lines",name="SAM-Teacher",line=dict(color="#137333",width=2),opacity=0.7))
+        fig2.update_layout(height=300,xaxis_title="Seconds",yaxis_title="Detections/frame",margin=dict(l=0,r=0,t=10,b=0))
+        st.plotly_chart(fig2,use_container_width=True)
+
+        # ── Download ────────────────────────────────────────────────────
+        st.markdown("### 📥 Download Annotated Videos (15 sec)")
         dc1, dc2 = st.columns(2)
         with dc1:
             if rb.get("video_b64"):
-                st.download_button("⬇ Download Baseline Video", base64.b64decode(rb["video_b64"]),
-                                   f"baseline_annotated.mp4", "video/mp4", use_container_width=True)
-            else:
-                st.caption("Baseline video unavailable")
+                st.download_button("⬇ Baseline Annotated Video", base64.b64decode(rb["video_b64"]),
+                                   "baseline_annotated.mp4", "video/mp4", use_container_width=True)
         with dc2:
             if rs.get("video_b64"):
-                st.download_button("⬇ Download SAM-Teacher Video", base64.b64decode(rs["video_b64"]),
-                                   "SAM_teacher_annotated.mp4", "video/mp4", use_container_width=True)
-            else:
-                st.caption("SAM video unavailable")
+                st.download_button("⬇ SAM-Teacher Annotated Video", base64.b64decode(rs["video_b64"]),
+                                   "SAM_annotated.mp4", "video/mp4", use_container_width=True)
 
-# ── Pre-computed (Hidden) ────────────────────────────────────────────
-
-
-# ── Training Comparison ──────────────────────────────────────────────
-
-st.markdown("---")
-st.markdown("### 🏆 Training Results Comparison (Test Set)")
-
-# Top-level KPIs
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("mAP50", "0.558 → 0.864", "+55%", delta_color="normal")
-k2.metric("mAP50-95", "0.281 → 0.710", "+153%", delta_color="normal")
-k3.metric("Precision", "0.674 → 0.870", "+29%", delta_color="normal")
-k4.metric("Recall", "0.612 → 0.804", "+31%", delta_color="normal")
-
-st.caption("Baseline (trained directly on original labels) → SAM-Teacher (9,994 SAM-refined pseudo-labels)")
-
-# Per-class comparison
-st.markdown("#### Per-Class mAP50")
-per_class = [
-    ("Person", 0.850, 0.935, "+0.085"),
-    ("Helmet", 0.930, 0.900, "-0.030"),
-    ("Vest", 0.897, 0.898, "+0.001"),
-    ("Goggles", 0.831, 0.721, "-0.110"),
-    ("Gloves", 0.762, 0.840, "+0.078"),
-    ("Boots", 0.735, 0.886, "+0.151"),
-]
-df_pc = pd.DataFrame(per_class, columns=["Class","Baseline","SAM-Teacher","Δ"])
-# Color code: green for positive delta, red for negative
-def color_delta(val):
-    if isinstance(val, str) and val.startswith("+"):
-        return "color: #137333"
-    elif isinstance(val, str) and val.startswith("-"):
-        return "color: #c5221f"
-    return ""
-st.dataframe(df_pc.style.map(color_delta, subset=["Δ"]), hide_index=True, use_container_width=True)
-
-# Key facts
-st.markdown("#### Key Facts")
-fc1, fc2, fc3 = st.columns(3)
-fc1.markdown("""
-<div class="card">
-<strong>🎓 Training</strong><br>
-Both use <b>YOLO11m</b> (40.5 MB)<br>
-Baseline: 86 epochs (1.42 hrs)<br>
-SAM: 100 epochs (1.44 hrs)<br>
-+66 min SAM labeling overhead
-</div>
-""", unsafe_allow_html=True)
-fc2.markdown("""
-<div class="card">
-<strong>⚡ Inference Speed</strong><br>
-Same for both models<br>
-CPU: ~1.5 FPS<br>
-GPU T4: ~85 FPS<br>
-Identical deployment cost
-</div>
-""", unsafe_allow_html=True)
-fc3.markdown("""
-<div class="card">
-<strong>🏆 Winners</strong><br>
-<b>SAM wins:</b> Person, Gloves, Boots<br>
-<b>Baseline wins:</b> Helmet, Goggles<br>
-<b>Tie:</b> Vest<br>
-Overall: <b>SAM +55% mAP50</b>
-</div>
-""", unsafe_allow_html=True)
+else:
+    # No video uploaded yet — show placeholder
+    st.info("👆 Upload a video above to see live PPE compliance detection. Both Baseline & SAM-Teacher models run automatically on a T4 GPU.")
