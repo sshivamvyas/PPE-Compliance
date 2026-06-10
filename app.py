@@ -104,17 +104,21 @@ if video_file:
         fig.update_layout(height=400,barmode="group",margin=dict(l=0,r=0,t=10,b=0))
         st.plotly_chart(fig,use_container_width=True)
 
-        # Side-by-side preview videos (15 sec)
-        st.markdown("### 🎬 Preview (first 15 seconds)")
+        # Side-by-side annotated preview frames
+        st.markdown("### 📸 Annotated Preview (first frame)")
         cv1, cv2 = st.columns(2)
         with cv1:
             st.markdown('<span class="badge badge-base">Baseline</span>', unsafe_allow_html=True)
-            if rb.get("video_b64"):
-                st.video(base64.b64decode(rb["video_b64"]))
+            if rb.get("preview_b64"):
+                st.image(base64.b64decode(rb["preview_b64"]), use_container_width=True)
+            else:
+                st.info("Preview unavailable")
         with cv2:
             st.markdown('<span class="badge badge-sam">SAM-Teacher</span>', unsafe_allow_html=True)
-            if rs.get("video_b64"):
-                st.video(base64.b64decode(rs["video_b64"]))
+            if rs.get("preview_b64"):
+                st.image(base64.b64decode(rs["preview_b64"]), use_container_width=True)
+            else:
+                st.info("Preview unavailable")
 
         # Per-person compliance
         if rb.get("compliance") or rs.get("compliance"):
