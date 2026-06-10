@@ -1,19 +1,17 @@
 """
-PPE Compliance — Live Dashboard
-==================================
-Two modes:
-  1. Pre-computed Results — loads saved JSONs (instant)
-  2. Upload & Detect — upload any video, process on CPU, see results
+PPE Compliance — Dashboard
+============================
+Shows pre-computed detection results from Baseline YOLO11m vs SAM-Teacher YOLO11m.
+Side-by-side video comparison, per-class charts, and detailed metrics.
+
+Add your own videos: process locally with run_video.py → push JSONs → refresh.
 
 Usage: streamlit run app.py
 """
 
 import streamlit as st
 import json
-import cv2
-import numpy as np
-import tempfile
-import os
+import glob
 from pathlib import Path
 from collections import defaultdict
 import pandas as pd
@@ -29,236 +27,213 @@ st.markdown("""
     .badge { display: inline-block; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-weight: 600; }
     .badge-base { background: #e8f0fe; color: #1a73e8; }
     .badge-sam { background: #e6f4ea; color: #137333; }
+    .metric-box { background: #f8f9fa; border-radius: 12px; padding: 16px; text-align: center; }
+    .metric-box h2 { margin: 0; font-size: 2rem; }
+    .metric-box p { margin: 4px 0 0; color: #666; font-size: 0.85rem; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Constants ────────────────────────────────────────────────────────────────
-CLASS_NAMES = {0:"helmet",1:"gloves",2:"vest",3:"boots",4:"goggles",6:"Person"}
-SAM_REMAP = {0:6,1:0,2:2,3:1,4:4,5:3}
-COLORS = {0:(255,255,0),1:(255,0,255),2:(0,165,255),3:(255,0,0),4:(0,255,255),6:(0,255,0)}
-
-HF_MODELS = {
-    "baseline": "sshivamvyas/ppe-compliance-baseline",
-    "sam": "sshivamvyas/ppe-compliance-sam",
-}
-
-# ── Model Loading ────────────────────────────────────────────────────────────
-@st.cache_resource
-def load_models():
-    """Download models from Hugging Face Hub (first time) or load from cache."""
-    from huggingface_hub import hf_hub_download
-    from ultralytics import YOLO
-    import torch
-
-    models = {}
-    for name, repo in HF_MODELS.items():
-        try:
-            path = hf_hub_download(repo_id=repo, filename="best.pt")
-            models[name] = YOLO(path)
-        except Exception as e:
-            st.warning(f"Could not load {name} model: {e}")
-            models[name] = None
-    return models
-
-# ── Inference ────────────────────────────────────────────────────────────────
-def detect_frame(model, frame, is_sam=False):
-    results = model(frame, verbose=False)
-    if results[0].boxes is None: return np.array([]), np.array([], dtype=int), np.array([])
-    boxes = results[0].boxes.xyxy.cpu().numpy()
-    cls = results[0].boxes.cls.cpu().numpy().astype(int)
-    confs = results[0].boxes.conf.cpu().numpy()
-    if is_sam:
-        for i in range(len(cls)): cls[i] = SAM_REMAP.get(int(cls[i]), int(cls[i]))
-    return boxes, cls, confs
-
-def draw_boxes(frame, boxes, cls_ids, confs):
-    disp = frame.copy()
-    for i in range(len(boxes)):
-        x1,y1,x2,y2 = map(int, boxes[i])
-        cid = int(cls_ids[i])
-        color = COLORS.get(cid, (128,128,128))
-        cv2.rectangle(disp, (x1,y1), (x2,y2), color, 2)
-        name = CLASS_NAMES.get(cid, f"c{cid}")
-        cv2.putText(disp, f"{name} {confs[i]:.2f}", (x1,y1-4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-    return disp
-
-def process_video(model, video_path, is_sam=False):
-    cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    out_path = tempfile.mktemp(suffix=".mp4")
-    fourcc = cv2.VideoWriter_fourcc(*"avc1")
-    writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
-
-    records = []
-    class_totals = {}
-    total_dets = 0
-    progress = st.progress(0)
-    status = st.empty()
-
-    for idx in range(total):
-        ret, frame = cap.read()
-        if not ret: break
-        boxes, cls_ids, confs = detect_frame(model, frame, is_sam)
-
-        if len(boxes) > 0:
-            frame = draw_boxes(frame, boxes, cls_ids, confs)
-        writer.write(frame)
-
-        rec = {"frame":idx,"time":round(idx/fps,2),"detections":int(len(boxes)),"classes":{}}
-        for cid in cls_ids:
-            name = CLASS_NAMES.get(int(cid), f"c{int(cid)}")
-            rec["classes"][name] = rec["classes"].get(name, 0) + 1
-            class_totals[name] = class_totals.get(name, 0) + 1
-        total_dets += len(boxes)
-        records.append(rec)
-
-        if idx % max(1, total//20) == 0:
-            progress.progress(min(1.0, idx/max(1,total-1)))
-            status.text(f"Frame {idx}/{total}")
-
-    cap.release(); writer.release()
-    progress.progress(1.0); status.empty()
-    return records, out_path, class_totals, total_dets
-
-# ── Load Pre-computed ────────────────────────────────────────────────────────
+# ── Load Data ────────────────────────────────────────────────────────────────
 @st.cache_data
-def load_precomputed():
-    results = {"baseline": {}, "sam": {}}
+def load_results():
+    results = {}
     for p in sorted(Path("outputs").glob("*.json")):
-        with open(p) as f: data = json.load(f)
+        with open(p) as f:
+            data = json.load(f)
         model = "sam" if "sam" in p.stem.lower() else "baseline"
-        vname = p.stem.replace(f"_{model}","").replace(f"_{model.capitalize()}","")
-        results[model][vname] = data
+        vname = p.stem.replace("input_", "").replace("_baseline", "").replace("_sam", "").replace("_Baseline", "").replace("_Sam", "")
+        if vname not in results:
+            results[vname] = {}
+        results[vname][model] = data
     return results
+
+def find_video(video_name, model):
+    """Find preview video if available."""
+    patterns = [
+        f"outputs/input_{video_name}_{model}_preview.mp4",
+        f"outputs/input_{video_name}_preview.mp4",
+        f"outputs/input_{video_name}_{model}.mp4",
+    ]
+    for pat in patterns:
+        if Path(pat).exists():
+            return pat
+    return None
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  UI
 # ═══════════════════════════════════════════════════════════════════════════════
 
 st.markdown('<p class="main-header">🦺 PPE Compliance Detection</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header">Baseline vs SAM-Teacher — Live Comparison</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-header">Baseline YOLO11m vs SAM-Teacher YOLO11m — Live Comparison Dashboard</p>', unsafe_allow_html=True)
 
-mode = st.sidebar.radio("Mode", ["📊 Pre-computed Results", "📤 Upload & Detect"], index=1)
+all_results = load_results()
+
+# ── Sidebar ──────────────────────────────────────────────────────────────────
+st.sidebar.markdown("### 📈 Model Comparison")
+st.sidebar.markdown('<span class="badge badge-base">Baseline</span> mAP50: **0.558**', unsafe_allow_html=True)
+st.sidebar.markdown('<span class="badge badge-sam">SAM-Teacher</span> mAP50: **0.864**', unsafe_allow_html=True)
+st.sidebar.markdown("**+55% improvement** — with 9,994 SAM pseudo-labels")
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("### 📈 Model Stats")
-st.sidebar.markdown('<span class="badge badge-base">Baseline</span> mAP50: **0.558**', unsafe_allow_html=True)
-st.sidebar.markdown('<span class="badge badge-sam">SAM-Refined</span> mAP50: **0.864**', unsafe_allow_html=True)
-st.sidebar.markdown("**+55% improvement**")
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  MODE 1: Pre-computed
-# ═══════════════════════════════════════════════════════════════════════════════
-if mode == "📊 Pre-computed Results":
-    results = load_precomputed()
-    all_videos = sorted(set(list(results["baseline"].keys()) + list(results["sam"].keys())))
-
-    if not all_videos:
-        st.info("No pre-computed results. Switch to Upload & Detect mode.")
-        st.stop()
-
-    selected = st.sidebar.selectbox("Video", all_videos)
-    base_data = results["baseline"].get(selected)
-    sam_data = results["sam"].get(selected)
-
-    st.markdown(f"### 🎯 Results: `{selected}`")
-
-    col_b, col_s = st.columns(2)
-    with col_b:
-        st.markdown('<span class="badge badge-base">Baseline</span>', unsafe_allow_html=True)
-        if base_data: st.metric("Detections", f"{base_data['total_detections']:,}", f"{base_data['total_detections']/max(base_data['frames'],1):.1f}/frame")
-    with col_s:
-        st.markdown('<span class="badge badge-sam">SAM-Refined</span>', unsafe_allow_html=True)
-        if sam_data: st.metric("Detections", f"{sam_data['total_detections']:,}", f"{sam_data['total_detections']/max(sam_data['frames'],1):.1f}/frame")
-
-    if base_data and sam_data:
-        all_classes = sorted(set(list(base_data.get("class_totals",{}).keys()) + list(sam_data.get("class_totals",{}).keys())))
-        df = pd.DataFrame([{"Class":c, "Baseline": base_data["class_totals"].get(c,0), "SAM": sam_data["class_totals"].get(c,0)} for c in all_classes])
-        fig = go.Figure()
-        fig.add_trace(go.Bar(x=df["Class"],y=df["Baseline"],name="Baseline",marker_color="#1a73e8"))
-        fig.add_trace(go.Bar(x=df["Class"],y=df["SAM"],name="SAM-Refined",marker_color="#137333"))
-        fig.update_layout(height=400, barmode="group", margin=dict(l=0,r=0,t=10,b=0))
-        st.plotly_chart(fig, use_container_width=True)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  MODE 2: Upload & Detect
-# ═══════════════════════════════════════════════════════════════════════════════
+if not all_results:
+    st.sidebar.warning("No results found in outputs/")
+    video_options = []
 else:
-    st.markdown("### 📤 Upload Video for Live Detection")
+    video_options = sorted(all_results.keys())
 
-    st.info("""
-    **How it works:** Upload any video → both models process it on CPU → see results side by side.
-    Processing speed: ~1-2 frames/sec on CPU (a 10-second video takes ~3-5 minutes).
-    For faster processing, use the preprocessing script locally with a GPU.
+if video_options:
+    selected = st.sidebar.selectbox("📹 Select Video", video_options)
+else:
+    selected = None
+    st.warning("""
+    ### No pre-computed results yet
+
+    Process a video locally to populate this dashboard:
+    ```bash
+    cd ppe-deploy-phase
+    python preprocess.py --video your_video.mp4
+    ```
+
+    Then push the generated JSON files to GitHub. The dashboard updates automatically.
     """)
 
-    video_file = st.file_uploader("Choose a video file", type=["mp4","avi","mov","webm"])
+if not selected:
+    st.info("No videos available. See sidebar for how to add one.")
+    st.stop()
 
-    if video_file:
-        # Save uploaded video
-        tmp_video = tempfile.mktemp(suffix=f".{video_file.name.split('.')[-1]}")
-        with open(tmp_video, "wb") as f:
-            f.write(video_file.read())
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Results for selected video
+# ═══════════════════════════════════════════════════════════════════════════════
 
-        st.video(video_file)
-        st.caption(f"Ready: {video_file.name} ({video_file.size/1e6:.1f} MB)")
+data = all_results[selected]
+base = data.get("baseline")
+sam = data.get("sam")
 
-        if st.button("🚀 Process with Both Models", type="primary", use_container_width=True):
-            with st.spinner("Loading models (first time downloads ~40 MB each)..."):
-                models = load_models()
+st.markdown(f"### 🎯 Video: `{selected}`")
 
-            baseline_model = models.get("baseline")
-            sam_model = models.get("sam")
+# ── KPI Cards ────────────────────────────────────────────────────────────────
+cols = st.columns(4)
+with cols[0]:
+    st.metric(
+        "Baseline Detections",
+        f"{base['total_detections']:,}" if base else "N/A",
+        delta=f"{base['total_detections']/max(base['frames'],1):.1f}/frame" if base else None,
+    )
+with cols[1]:
+    st.metric(
+        "SAM-Teacher Detections",
+        f"{sam['total_detections']:,}" if sam else "N/A",
+        delta=f"{sam['total_detections']/max(sam['frames'],1):.1f}/frame" if sam else None,
+    )
+with cols[2]:
+    val = base['total_detections'] if base else 0
+    st.metric("Frames Processed", f"{base['frames']}" if base else "N/A")
+with cols[3]:
+    if base and sam:
+        improvement = ((sam['total_detections'] - base['total_detections']) / max(base['total_detections'], 1)) * 100
+        st.metric("SAM vs Baseline", f"{improvement:+.1f}%", "more detections")
 
-            if baseline_model is None or sam_model is None:
-                st.error("""
-                Models not available. Upload them to Hugging Face first:
-                1. Go to https://huggingface.co/sshivamvyas
-                2. Create model repos: `ppe-compliance-baseline` and `ppe-compliance-sam`
-                3. Upload `baseline_best.pt` and `best_sam_refined.pt` as `best.pt` in each
-                """)
-                st.stop()
+# ── Per-Class Comparison Chart ───────────────────────────────────────────────
+if base and sam:
+    st.markdown("### 📊 Per-Class Detections")
 
-            # ── Process Baseline ─────────────────────────────────────────
-            st.markdown("### <span class='badge badge-base'>Baseline</span> Processing...", unsafe_allow_html=True)
-            records_base, video_base, class_base, total_base = process_video(baseline_model, tmp_video, is_sam=False)
+    all_classes = sorted(set(
+        list(base.get("class_totals", {}).keys()) +
+        list(sam.get("class_totals", {}).keys())
+    ))
 
-            # ── Process SAM ──────────────────────────────────────────────
-            st.markdown("### <span class='badge badge-sam'>SAM-Refined</span> Processing...", unsafe_allow_html=True)
-            records_sam, video_sam, class_sam, total_sam = process_video(sam_model, tmp_video, is_sam=True)
+    df = pd.DataFrame([
+        {
+            "Class": c,
+            "Baseline": base["class_totals"].get(c, 0),
+            "SAM-Teacher": sam["class_totals"].get(c, 0),
+        }
+        for c in all_classes
+    ])
 
-            # ── Results ──────────────────────────────────────────────────
-            st.markdown("---")
-            st.markdown("### 📊 Results")
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=df["Class"], y=df["Baseline"], name="Baseline",
+                         marker_color="#1a73e8", text=df["Baseline"], textposition="outside"))
+    fig.add_trace(go.Bar(x=df["Class"], y=df["SAM-Teacher"], name="SAM-Teacher",
+                         marker_color="#137333", text=df["SAM-Teacher"], textposition="outside"))
+    fig.update_layout(
+        height=400, barmode="group",
+        margin=dict(l=0, r=0, t=10, b=0),
+        legend=dict(orientation="h", y=1.1),
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Baseline Detections", f"{total_base:,}", f"{total_base/max(len(records_base),1):.1f}/frame")
-            with col2:
-                st.metric("SAM-Refined Detections", f"{total_sam:,}", f"{total_sam/max(len(records_sam),1):.1f}/frame")
+    # Table
+    with st.expander("📋 Data Table"):
+        df_disp = df.copy()
+        if "Baseline" in df_disp.columns and "SAM-Teacher" in df_disp.columns:
+            df_disp["Δ"] = df_disp["SAM-Teacher"] - df_disp["Baseline"]
+        st.dataframe(df_disp, hide_index=True, use_container_width=True)
 
-            # Charts
-            all_cls = sorted(set(list(class_base.keys()) + list(class_sam.keys())))
-            df = pd.DataFrame([{"Class":c,"Baseline":class_base.get(c,0),"SAM":class_sam.get(c,0)} for c in all_cls])
-            fig = go.Figure()
-            fig.add_trace(go.Bar(x=df["Class"],y=df["Baseline"],name="Baseline",marker_color="#1a73e8"))
-            fig.add_trace(go.Bar(x=df["Class"],y=df["SAM"],name="SAM-Refined",marker_color="#137333"))
-            fig.update_layout(height=400, barmode="group", margin=dict(l=0,r=0,t=10,b=0))
-            st.plotly_chart(fig, use_container_width=True)
+# ── Side-by-Side Videos ──────────────────────────────────────────────────────
+st.markdown("### 🎬 Annotated Videos")
 
-            # Annotated videos
-            st.markdown("### 🎬 Annotated Videos")
-            cv1, cv2 = st.columns(2)
-            with cv1:
-                st.markdown('<span class="badge badge-base">Baseline</span>', unsafe_allow_html=True)
-                st.video(video_base)
-            with cv2:
-                st.markdown('<span class="badge badge-sam">SAM-Refined</span>', unsafe_allow_html=True)
-                st.video(video_sam)
+video_base = find_video(selected, "baseline")
+video_sam = find_video(selected, "sam")
 
-            # Download
-            csv_data = pd.DataFrame(records_sam).to_csv(index=False)
-            st.download_button("📥 Download Detection CSV", csv_data, "detections.csv", "text/csv")
+col_v1, col_v2 = st.columns(2)
+
+with col_v1:
+    st.markdown('<span class="badge badge-base">Baseline YOLO11m</span> (mAP50: 0.558)', unsafe_allow_html=True)
+    if video_base and Path(video_base).exists():
+        st.video(video_base)
+    else:
+        st.warning("Preview video not found (too large for GitHub). Process locally to generate.")
+
+with col_v2:
+    st.markdown('<span class="badge badge-sam">SAM-Teacher YOLO11m</span> (mAP50: 0.864)', unsafe_allow_html=True)
+    if video_sam and Path(video_sam).exists():
+        st.video(video_sam)
+    else:
+        st.warning("Preview video not found (too large for GitHub). Process locally to generate.")
+
+# ── Time-Series: Detections per frame ────────────────────────────────────────
+if base and sam:
+    st.markdown("### 📈 Detection Density Over Time")
+
+    base_ts = [(r["time"], r["detections"]) for r in base.get("records", [])]
+    sam_ts = [(r["time"], r["detections"]) for r in sam.get("records", [])]
+
+    fig2 = go.Figure()
+    if base_ts:
+        t, d = zip(*base_ts)
+        fig2.add_trace(go.Scatter(x=t, y=d, mode="lines", name="Baseline",
+                                  line=dict(color="#1a73e8", width=1), opacity=0.7))
+    if sam_ts:
+        t, d = zip(*sam_ts)
+        fig2.add_trace(go.Scatter(x=t, y=d, mode="lines", name="SAM-Teacher",
+                                  line=dict(color="#137333", width=2), opacity=0.7))
+    fig2.update_layout(height=350, xaxis_title="Time (seconds)", yaxis_title="Detections per frame",
+                       margin=dict(l=0, r=0, t=10, b=0),
+                       legend=dict(orientation="h", y=1.1))
+    st.plotly_chart(fig2, use_container_width=True)
+
+# ── Process your own video ───────────────────────────────────────────────────
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🔧 Add Your Own Video")
+st.sidebar.markdown("""
+Run locally with GPU:
+```bash
+cd ppe-deploy-phase
+python preprocess.py --video your_video.mp4
+```
+Push the new JSONs to GitHub → dashboard updates automatically.
+
+**Coming soon:** Live GPU via Modal (10-second inference).
+""")
+
+# ── Footer ───────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.markdown("""
+<small>
+**Approach:** Baseline YOLO11m trained directly on Construction-PPE →
+SAM-Teacher (Grounding DINO + SAM 1) generates 9,994 pseudo-labels →
+YOLO11m student on refined labels. mAP50: 0.558 → 0.864 (+55%).
+</small>
+""", unsafe_allow_html=True)
