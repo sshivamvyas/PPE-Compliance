@@ -190,7 +190,8 @@ def detect_http(item: dict):
     GPU inference with person-PPE association via pose keypoints.
     Returns per-person compliance for both models.
     """
-    import cv2, numpy as np, json, tempfile, base64, traceback
+    import cv2, numpy as np, json, tempfile, base64, traceback, subprocess, shutil
+    from collections import defaultdict
     from datetime import datetime
     from pathlib import Path
     import torch
@@ -385,7 +386,6 @@ def detect_http(item: dict):
             cap.release()
 
             # Encode frames to MP4 using ffmpeg (reliable browser-compatible output)
-            import subprocess
             ffmpeg_cmd = [
                 "ffmpeg", "-y", "-framerate", str(fps),
                 "-i", f"{frame_dir}/frame_%06d.png",
@@ -394,7 +394,6 @@ def detect_http(item: dict):
                 out_video
             ]
             subprocess.run(ffmpeg_cmd, capture_output=True)
-            import shutil
             shutil.rmtree(frame_dir, ignore_errors=True)
 
             # Aggregate compliance
