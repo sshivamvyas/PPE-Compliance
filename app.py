@@ -33,6 +33,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ── Modal URL (replace after `modal deploy`) ─────────────────────────────────
+MODAL_URL = "https://shivamvyas--ppe-compliance-detect-http.modal.run"
+
 # ── Load Data ────────────────────────────────────────────────────────────────
 @st.cache_data
 def load_results():
@@ -218,17 +221,123 @@ if base and sam:
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🔧 Add Your Own Video")
 st.sidebar.markdown("""
-Run locally with GPU:
+**Pre-computed:** Run locally with GPU:
 ```bash
-cd ppe-deploy-phase
 python preprocess.py --video your_video.mp4
 ```
-Push the new JSONs to GitHub → dashboard updates automatically.
+Push JSONs to GitHub → auto-updates.
 
-**Coming soon:** Live GPU via Modal (10-second inference).
+**Live GPU:** Upload any video below for instant T4 GPU processing.
 """)
 
 # ── Footer ───────────────────────────────────────────────────────────────────
+st.markdown("---")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  LIVE GPU Inference via Modal
+# ═══════════════════════════════════════════════════════════════════════════════
+
+st.markdown("### ⚡ Live GPU Inference (Modal T4)")
+
+# MODAL_URL = "https://shivamvyas--ppe-compliance-detect-http.modal.run"
+# After deploying Modal, replace the URL above with yours from `modal deploy` output.
+
+with st.expander("🔧 Modal Setup (one-time)", expanded=False):
+    st.markdown("""
+    **1. Authenticate:**
+    ```bash
+    modal setup    # opens browser, sign up with GitHub
+    ```
+
+    **2. Upload models + deploy:**
+    ```bash
+    cd ppe-deploy-clean
+    modal run modal_inference.py::upload_models
+    modal deploy modal_inference.py
+    ```
+
+    **3. Copy the URL** printed after deploy (ends with `.modal.run`)
+    and paste it into `MODAL_URL` in `app.py`. Then push to GitHub.
+    """)
+
+# ── Live GPU Inference (HTTP call to Modal) ──────────────────────────────────
+
+st.markdown("### ⚡ Live GPU Inference (Modal T4)")
+
+video_file = st.file_uploader(
+    "Upload a video for GPU processing",
+    type=["mp4", "avi", "mov", "webm"],
+    help="Video is processed on Modal T4 GPU (~10-15 sec)",
+    key="live_upload",
+)
+
+if video_file:
+    st.video(video_file)
+    st.caption(f"{video_file.name} — {video_file.size/1e6:.1f} MB")
+
+    if st.button("🚀 Process on GPU", type="primary", use_container_width=True):
+        with st.spinner("⚡ Sending to Modal T4 GPU... this takes ~10-15 seconds"):
+
+            try:
+                import requests
+                import base64
+
+                # Read video bytes once
+                video_bytes = video_file.read()
+                video_b64 = base64.b64encode(video_bytes).decode()
+
+                response = requests.post(
+                    MODAL_URL if MODAL_URL else "http://localhost:8000",
+                    json={"video_b64": video_b64, "video_name": video_file.name},
+                    timeout=300,
+                )
+
+                if response.status_code != 200:
+                    st.error(f"Modal returned {response.status_code}: {response.text[:200]}")
+                else:
+                    result = response.json()
+                    if "error" in result:
+                        st.error(f"Modal error: {result['error']}")
+                    else:
+                        r_b = result["results"]["baseline"]
+                        r_s = result["results"]["sam"]
+
+                        st.success(f"✅ Done! {r_b['frames']} frames processed on T4")
+                        st.balloons()
+
+                        # KPIs
+                        c1, c2 = st.columns(2)
+                        c1.metric("Baseline", f"{r_b['total_detections']:,}",
+                                  f"{r_b['total_detections']/max(r_b['frames'],1):.1f}/frame")
+                        c2.metric("SAM-Teacher", f"{r_s['total_detections']:,}",
+                                  f"{r_s['total_detections']/max(r_s['frames'],1):.1f}/frame")
+
+                        # Charts
+                        all_c = sorted(set(list(r_b['class_totals'].keys()) + list(r_s['class_totals'].keys())))
+                        df = pd.DataFrame([{"Class":c,"Baseline":r_b['class_totals'].get(c,0),
+                                           "SAM-Teacher":r_s['class_totals'].get(c,0)} for c in all_c])
+                        fig = go.Figure()
+                        fig.add_trace(go.Bar(x=df["Class"],y=df["Baseline"],name="Baseline",
+                                             marker_color="#1a73e8",text=df["Baseline"],textposition="outside"))
+                        fig.add_trace(go.Bar(x=df["Class"],y=df["SAM-Teacher"],name="SAM-Teacher",
+                                             marker_color="#137333",text=df["SAM-Teacher"],textposition="outside"))
+                        fig.update_layout(height=400,barmode="group",margin=dict(l=0,r=0,t=10,b=0))
+                        st.plotly_chart(fig, use_container_width=True)
+
+                        # Videos
+                        st.markdown("### 🎬 Annotated Videos")
+                        cv1, cv2 = st.columns(2)
+                        with cv1:
+                            st.markdown("**Baseline**")
+                            st.video(base64.b64decode(r_b["video_b64"]))
+                        with cv2:
+                            st.markdown("**SAM-Teacher**")
+                            st.video(base64.b64decode(r_s["video_b64"]))
+
+            except Exception as e:
+                st.warning(f"Modal not responding: {e}")
+                st.info("Deploy Modal first (see expander above), then paste the URL.")
+
 st.markdown("---")
 st.markdown("""
 <small>
