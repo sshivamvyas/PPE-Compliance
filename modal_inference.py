@@ -255,13 +255,9 @@ def detect_http(item: dict):
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             is_sam = (model_name == "sam")
 
-            # Output video
-            fourcc = cv2.VideoWriter_fourcc(*"H264")
+            # Output video: use ffmpeg for reliable browser-compatible encoding
+            frame_dir = tempfile.mkdtemp()
             out_video = tempfile.mktemp(suffix=".mp4")
-            writer = cv2.VideoWriter(out_video, fourcc, fps, (out_w, out_h))
-            if not writer.isOpened():
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                writer = cv2.VideoWriter(out_video, fourcc, fps, (out_w, out_h))
 
             records, class_totals, total_dets = [], {}, 0
             compliance_log = []  # per-person per-frame
@@ -383,9 +379,23 @@ def detect_http(item: dict):
 
                     if scale < 1.0:
                         disp = cv2.resize(disp, (out_w, out_h))
-                    writer.write(disp)
+                    if idx < preview_frames:
+                        cv2.imwrite(f"{frame_dir}/frame_{idx:06d}.png", disp)
 
-            cap.release(); writer.release()
+            cap.release()
+
+            # Encode frames to MP4 using ffmpeg (reliable browser-compatible output)
+            import subprocess
+            ffmpeg_cmd = [
+                "ffmpeg", "-y", "-framerate", str(fps),
+                "-i", f"{frame_dir}/frame_%06d.png",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-preset", "ultrafast", "-crf", "28",
+                out_video
+            ]
+            subprocess.run(ffmpeg_cmd, capture_output=True)
+            import shutil
+            shutil.rmtree(frame_dir, ignore_errors=True)
 
             # Aggregate compliance
             person_compliance_agg = defaultdict(lambda: defaultdict(int))
