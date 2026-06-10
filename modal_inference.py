@@ -191,82 +191,109 @@ def detect_http(item: dict):
     Expects: {"video_b64": "<base64>", "video_name": "video.mp4"}
     Returns: {"results": {...}, "processed_at": "..."}
     """
-    import cv2, numpy as np, json, tempfile, base64
+    import cv2, numpy as np, json, tempfile, base64, traceback
     from datetime import datetime
     from pathlib import Path
     import torch
     from ultralytics import YOLO
 
-    # Load models
-    b = Path(MODEL_PATH) / "baseline_best.pt"
-    s = Path(MODEL_PATH) / "best_sam_refined.pt"
-    model_base = YOLO(str(b))
-    model_sam = YOLO(str(s))
+    try:
+        # Load models
+        b = Path(MODEL_PATH) / "baseline_best.pt"
+        s = Path(MODEL_PATH) / "best_sam_refined.pt"
+        print(f"[Modal] Checking models: {b} exists={b.exists()}, {s} exists={s.exists()}")
 
-    # Decode video
-    video_bytes = base64.b64decode(item["video_b64"])
-    video_name = item.get("video_name", "video.mp4")
-    tmp_video = tempfile.mktemp(suffix=f"_{video_name}")
-    with open(tmp_video, "wb") as f:
-        f.write(video_bytes)
+        if not b.exists():
+            # List volume contents
+            vol_files = list(Path(MODEL_PATH).glob("**/*"))
+            return {"error": f"baseline_best.pt not found at {b}. Volume contents: {[str(f) for f in vol_files]}"}
+        if not s.exists():
+            vol_files = list(Path(MODEL_PATH).glob("**/*"))
+            return {"error": f"best_sam_refined.pt not found at {s}. Volume contents: {[str(f) for f in vol_files]}"}
 
-    results = {}
-    for model_name, model in [("baseline", model_base), ("sam", model_sam)]:
-        cap = cv2.VideoCapture(tmp_video)
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        print("[Modal] Loading baseline model...")
+        model_base = YOLO(str(b))
+        print("[Modal] Loading SAM model...")
+        model_sam = YOLO(str(s))
+        print("[Modal] Both models loaded successfully")
 
-        out_video = tempfile.mktemp(suffix=".mp4")
-        fourcc = cv2.VideoWriter_fourcc(*"avc1")
-        writer = cv2.VideoWriter(out_video, fourcc, fps, (w, h))
+        # Decode video
+        video_bytes = base64.b64decode(item["video_b64"])
+        video_name = item.get("video_name", "video.mp4")
+        tmp_video = tempfile.mktemp(suffix=f"_{video_name}")
+        with open(tmp_video, "wb") as f:
+            f.write(video_bytes)
 
-        records, class_totals, total_dets = [], {}, 0
-        is_sam = (model_name == "sam")
+        results = {}
+        for model_name, model in [("baseline", model_base), ("sam", model_sam)]:
+            cap = cv2.VideoCapture(tmp_video)
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            print(f"[Modal] {model_name}: {total} frames, {w}x{h}, {fps}fps")
 
-        for idx in range(total):
-            ret, frame = cap.read()
-            if not ret: break
-            preds = model(frame, verbose=False, device=0)[0]
+            # Limit output resolution for annotated video
+            max_dim = 1280
+            scale = min(max_dim / max(w, h), 1.0)
+            out_w, out_h = int(w * scale), int(h * scale)
 
-            if preds.boxes is None:
-                writer.write(frame)
-                records.append({"frame":idx,"time":round(idx/fps,2),"detections":0,"classes":{}})
-                continue
+            out_video = tempfile.mktemp(suffix=".mp4")
+            fourcc = cv2.VideoWriter_fourcc(*"avc1")
+            writer = cv2.VideoWriter(out_video, fourcc, fps, (out_w, out_h))
 
-            boxes = preds.boxes.xyxy.cpu().numpy()
-            cls = preds.boxes.cls.cpu().numpy().astype(int)
-            confs = preds.boxes.conf.cpu().numpy()
-            if is_sam:
-                cls = np.array([SAM_REMAP.get(int(c), int(c)) for c in cls])
+            records, class_totals, total_dets = [], {}, 0
+            is_sam = (model_name == "sam")
 
-            disp = frame.copy()
-            for i in range(len(boxes)):
-                x1,y1,x2,y2 = map(int, boxes[i]); cid = int(cls[i])
-                color = COLORS.get(cid, (128,128,128))
-                cv2.rectangle(disp, (x1,y1), (x2,y2), color, 2)
-                name = CLASS_NAMES.get(cid, f"c{cid}")
-                cv2.putText(disp, f"{name} {confs[i]:.2f}", (x1,y1-4),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-            writer.write(disp)
+            for idx in range(total):
+                ret, frame = cap.read()
+                if not ret: break
+                preds = model(frame, verbose=False, device=0, imgsz=640)[0]
 
-            rec = {"frame":idx,"time":round(idx/fps,2),"detections":int(len(boxes)),"classes":{}}
-            for cid in cls:
-                cn = CLASS_NAMES.get(int(cid), f"c{int(cid)}")
-                rec["classes"][cn] = rec["classes"].get(cn, 0) + 1
-                class_totals[cn] = class_totals.get(cn, 0) + 1
-            total_dets += len(boxes)
-            records.append(rec)
+                if preds.boxes is None:
+                    disp = cv2.resize(frame, (out_w, out_h)) if scale < 1.0 else frame
+                    writer.write(disp)
+                    records.append({"frame":idx,"time":round(idx/fps,2),"detections":0,"classes":{}})
+                    continue
 
-        cap.release(); writer.release()
-        with open(out_video, "rb") as f:
-            video_b64 = base64.b64encode(f.read()).decode()
-        results[model_name] = {
-            "total_detections": total_dets, "frames": total,
-            "class_totals": class_totals, "records": records, "video_b64": video_b64,
-        }
+                boxes = preds.boxes.xyxy.cpu().numpy()
+                cls = preds.boxes.cls.cpu().numpy().astype(int)
+                confs = preds.boxes.conf.cpu().numpy()
+                if is_sam:
+                    cls = np.array([SAM_REMAP.get(int(c), int(c)) for c in cls])
 
-    return {"results": results, "processed_at": datetime.now().isoformat()}
+                disp = frame.copy()
+                for i in range(len(boxes)):
+                    x1,y1,x2,y2 = map(int, boxes[i]); cid = int(cls[i])
+                    color = COLORS.get(cid, (128,128,128))
+                    cv2.rectangle(disp, (x1,y1), (x2,y2), color, 2)
+                    name = CLASS_NAMES.get(cid, f"c{cid}")
+                    cv2.putText(disp, f"{name} {confs[i]:.2f}", (x1,y1-4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+                if scale < 1.0:
+                    disp = cv2.resize(disp, (out_w, out_h))
+                writer.write(disp)
+
+                rec = {"frame":idx,"time":round(idx/fps,2),"detections":int(len(boxes)),"classes":{}}
+                for cid in cls:
+                    cn = CLASS_NAMES.get(int(cid), f"c{int(cid)}")
+                    rec["classes"][cn] = rec["classes"].get(cn, 0) + 1
+                    class_totals[cn] = class_totals.get(cn, 0) + 1
+                total_dets += len(boxes)
+                records.append(rec)
+
+            cap.release(); writer.release()
+            with open(out_video, "rb") as f:
+                video_b64 = base64.b64encode(f.read()).decode()
+            results[model_name] = {
+                "total_detections": total_dets, "frames": total,
+                "class_totals": class_totals, "records": records, "video_b64": video_b64,
+            }
+            print(f"[Modal] {model_name}: {total_dets} detections across {total} frames")
+
+        return {"results": results, "processed_at": datetime.now().isoformat()}
+
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"}
 
 
 # ── Verify ──────────────────────────────────────────────────────────────────
