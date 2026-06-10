@@ -1,3 +1,6 @@
 streamlit
 pandas
 plotly
+ultralytics
+opencv-python-headless
+huggingface_hub
