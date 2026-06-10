@@ -226,6 +226,10 @@ def detect_http(item: dict):
 
                 records, class_totals, total_dets = [], {}, 0
                 preview_b64 = ""  # first annotated frame as JPEG
+                max_download_frames = min(total, int(fps * 15))  # 15 sec for download
+                out_video = tempfile.mktemp(suffix=".mp4")
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                writer = cv2.VideoWriter(out_video, fourcc, fps, (ow, oh))
 
                 for idx in range(total):
                     ret, frame = cap.read()
@@ -259,6 +263,12 @@ def detect_http(item: dict):
                         records.append(rec)
                     else:
                         records.append({"frame":idx,"time":round(idx/fps,2),"detections":0,"classes":{}})
+                        # Write raw frame (no detections)
+                        if idx < max_download_frames:
+                            if scale < 1.0:
+                                writer.write(cv2.resize(disp, (ow, oh)))
+                            else:
+                                writer.write(disp)
 
                     # Save first annotated frame as preview JPEG
                     if idx == 0:
@@ -267,14 +277,30 @@ def detect_http(item: dict):
                         _, buf = cv2.imencode(".jpg", disp, [cv2.IMWRITE_JPEG_QUALITY, 85])
                         preview_b64 = base64.b64encode(buf).decode()
 
-                cap.release()
+                    # Write frame to output video (first 15 sec only)
+                    if idx < max_download_frames:
+                        if scale < 1.0:
+                            writer.write(cv2.resize(disp, (ow, oh)))
+                        else:
+                            writer.write(disp)
+
+                cap.release(); writer.release()
+
+                # Read output video
+                video_b64 = ""
+                if Path(out_video).exists():
+                    with open(out_video, "rb") as f:
+                        data = f.read()
+                    if len(data) > 1000:
+                        video_b64 = base64.b64encode(data).decode()
 
                 results[model_name] = {
                     "total_detections": total_dets, "frames": total,
                     "class_totals": class_totals, "records": records,
                     "preview_b64": preview_b64,
+                    "video_b64": video_b64,
                 }
-                print(f"[Modal] {model_name} DONE: {total_dets} dets")
+                print(f"[Modal] {model_name} DONE: {total_dets} dets, video={len(video_b64)/1024:.0f}KB")
 
             except Exception as e:
                 print(f"[Modal] {model_name} FAILED: {traceback.format_exc()}")
