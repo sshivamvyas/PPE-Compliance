@@ -20,7 +20,8 @@ st.markdown("""
     .badge { display:inline-block; padding:3px 10px; border-radius:10px; font-size:0.75rem; font-weight:600; margin-right:4px; }
     .badge-base { background:#e8f0fe; color:#1a73e8; }
     .badge-sam { background:#e6f4ea; color:#137333; }
-    .card { background:#f8f9fa; border-radius:12px; padding:20px; border:1px solid #e8eaed; }
+    .card { background:#1e1e2e; border-radius:12px; padding:20px; border:1px solid #333; color:#e0e0e0; }
+    .card strong { color:#ffffff; }
 </style>
 """, unsafe_allow_html=True)
 
