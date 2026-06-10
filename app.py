@@ -5,8 +5,7 @@ Pre-computed results + Live GPU inference via Modal T4.
 """
 
 import streamlit as st
-import json, base64, requests
-from pathlib import Path
+import base64, requests
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -27,17 +26,6 @@ st.markdown("""
 
 MODAL_URL = "https://sshivamvyas--ppe-compliance-detect-http.modal.run"
 
-# ── Data ─────────────────────────────────────────────────────────────────────
-@st.cache_data
-def load_results():
-    results = {}
-    for p in sorted(Path("outputs").glob("*.json")):
-        with open(p) as f: data = json.load(f)
-        model = "sam" if "sam" in p.stem.lower() else "baseline"
-        vname = p.stem.replace("input_","").replace("_baseline","").replace("_sam","")
-        results.setdefault(vname, {})[model] = data
-    return results
-
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Header
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -53,11 +41,19 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
-st.sidebar.markdown("### 📈 Models")
+st.sidebar.markdown("### 📈 Trained Models")
 st.sidebar.markdown('<span class="badge badge-base">Baseline</span> mAP50: **0.558**', unsafe_allow_html=True)
 st.sidebar.markdown('<span class="badge badge-sam">SAM-Teacher</span> mAP50: **0.864**', unsafe_allow_html=True)
 st.sidebar.markdown("**+55%** with 9,994 SAM pseudo-labels")
+
 st.sidebar.markdown("---")
+st.sidebar.markdown("""
+**How it works:**  
+Upload any video → Modal T4 GPU processes it with both models → instant comparison.
+
+**Deployment:**  
+Streamlit Cloud (free) + Modal GPU (free credits)
+""")
 
 # ── Live GPU ─────────────────────────────────────────────────────────────────
 
@@ -144,17 +140,70 @@ if video_file:
             else:
                 st.caption("SAM video unavailable")
 
-# ── Pre-computed ─────────────────────────────────────────────────────────────
+# ── Pre-computed (Hidden) ────────────────────────────────────────────
+
+
+# ── Training Comparison ──────────────────────────────────────────────
 
 st.markdown("---")
-st.markdown("### 📊 Pre-computed Results")
+st.markdown("### 🏆 Training Results Comparison (Test Set)")
 
-all_results = load_results()
-if all_results:
-    selected = st.sidebar.selectbox("📹 Pre-computed video", sorted(all_results.keys()),
-                                     help="Switch between previously processed videos")
-    data = all_results[selected]
-    base, sam = data.get("baseline"), data.get("sam")
-    if base:
-        st.markdown(f"**{selected}** — Baseline: {base['total_detections']:,} detections"
-                    + (f", SAM: {sam['total_detections']:,}" if sam else " (SAM data pending)"))
+# Top-level KPIs
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("mAP50", "0.558 → 0.864", "+55%", delta_color="normal")
+k2.metric("mAP50-95", "0.281 → 0.710", "+153%", delta_color="normal")
+k3.metric("Precision", "0.674 → 0.870", "+29%", delta_color="normal")
+k4.metric("Recall", "0.612 → 0.804", "+31%", delta_color="normal")
+
+st.caption("Baseline (trained directly on original labels) → SAM-Teacher (9,994 SAM-refined pseudo-labels)")
+
+# Per-class comparison
+st.markdown("#### Per-Class mAP50")
+per_class = [
+    ("Person", 0.850, 0.935, "+0.085"),
+    ("Helmet", 0.930, 0.900, "-0.030"),
+    ("Vest", 0.897, 0.898, "+0.001"),
+    ("Goggles", 0.831, 0.721, "-0.110"),
+    ("Gloves", 0.762, 0.840, "+0.078"),
+    ("Boots", 0.735, 0.886, "+0.151"),
+]
+df_pc = pd.DataFrame(per_class, columns=["Class","Baseline","SAM-Teacher","Δ"])
+# Color code: green for positive delta, red for negative
+def color_delta(val):
+    if isinstance(val, str) and val.startswith("+"):
+        return "color: #137333"
+    elif isinstance(val, str) and val.startswith("-"):
+        return "color: #c5221f"
+    return ""
+st.dataframe(df_pc.style.map(color_delta, subset=["Δ"]), hide_index=True, use_container_width=True)
+
+# Key facts
+st.markdown("#### Key Facts")
+fc1, fc2, fc3 = st.columns(3)
+fc1.markdown("""
+<div class="card">
+<strong>🎓 Training</strong><br>
+Both use <b>YOLO11m</b> (40.5 MB)<br>
+Baseline: 86 epochs (1.42 hrs)<br>
+SAM: 100 epochs (1.44 hrs)<br>
++66 min SAM labeling overhead
+</div>
+""", unsafe_allow_html=True)
+fc2.markdown("""
+<div class="card">
+<strong>⚡ Inference Speed</strong><br>
+Same for both models<br>
+CPU: ~1.5 FPS<br>
+GPU T4: ~85 FPS<br>
+Identical deployment cost
+</div>
+""", unsafe_allow_html=True)
+fc3.markdown("""
+<div class="card">
+<strong>🏆 Winners</strong><br>
+<b>SAM wins:</b> Person, Gloves, Boots<br>
+<b>Baseline wins:</b> Helmet, Goggles<br>
+<b>Tie:</b> Vest<br>
+Overall: <b>SAM +55% mAP50</b>
+</div>
+""", unsafe_allow_html=True)
