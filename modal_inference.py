@@ -283,18 +283,13 @@ def detect_http(item: dict):
                             kpts_all = pp.keypoints.xy.cpu().numpy()
                             for pi in range(len(p_boxes)):
                                 if float(pp.boxes.conf[pi]) > 0.4:
-                                    # Filter small persons (likely false positives)
-                                    bx1,by1,bx2,by2 = p_boxes[pi]
-                                    area = (bx2-bx1)*(by2-by1)
-                                    if area > (w * h * 0.005):  # at least 0.5% of frame
-                                        persons.append(p_boxes[pi])
-                                        person_kpts.append(kpts_all[pi])
+                                    persons.append(p_boxes[pi])
+                                    person_kpts.append(kpts_all[pi])
                         pose_cache = (persons, person_kpts)
                     elif pose_cache:
                         persons, person_kpts = pose_cache
                     last_person_count = len(persons)
 
-                    # ── Person-PPE association ─────────────────────────
                     per_person = []
                     for pi in range(len(persons)):
                         px1, py1, px2, py2 = map(int, persons[pi])
@@ -402,8 +397,8 @@ def detect_http(item: dict):
                     "total_detections": total_dets, "frames": total,
                     "class_totals": class_totals, "records": records,
                     "preview_b64": preview_b64, "video_b64": video_b64,
-                    "persons_tracked": len(person_agg),
-                    "compliance": compliance_summary if compliance_summary else None,
+                    "persons_tracked": len(person_agg) if person_agg else last_person_count,
+                    "compliance": compliance_summary,
                 }
                 print(f"[Modal] {model_name} DONE: {total_dets} dets, video={len(video_b64)/1024:.0f}KB")
 

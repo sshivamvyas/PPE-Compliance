@@ -174,10 +174,12 @@ if video_file:
             st.dataframe(pd.DataFrame(rows_s, columns=["PPE Item","Detections","Density","Status"]),
                         hide_index=True, use_container_width=True)
 
-        # ── Per-Person Compliance (YOLO-pose) ───────────────────────────
-        if rb.get("compliance") or rs.get("compliance"):
+        # ── Per-Person Compliance ─────────────────────────────────────
+        persons_base = rb.get("persons_tracked", 0)
+        persons_sam = rs.get("persons_tracked", 0)
+        if persons_base > 0 or persons_sam > 0:
             st.markdown("### 🧑 Per-Person Compliance")
-            st.caption("Each person tracked via YOLO-pose keypoints. % = frames where PPE was detected near that person.")
+            st.caption(f"Persons tracked: {persons_base} (baseline) / {persons_sam} (SAM). % = frames with PPE detected.")
             cc1, cc2 = st.columns(2)
             with cc1:
                 st.markdown('<span class="badge badge-base">Baseline</span>', unsafe_allow_html=True)
