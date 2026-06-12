@@ -286,7 +286,7 @@ def detect_http(item: dict):
                                     # Filter small persons (likely false positives)
                                     bx1,by1,bx2,by2 = p_boxes[pi]
                                     area = (bx2-bx1)*(by2-by1)
-                                    if area > (w * h * 0.02):  # at least 2% of frame
+                                    if area > (w * h * 0.005):  # at least 0.5% of frame
                                         persons.append(p_boxes[pi])
                                         person_kpts.append(kpts_all[pi])
                         pose_cache = (persons, person_kpts)
@@ -424,7 +424,7 @@ def detect_http(item: dict):
                     "class_totals": class_totals, "records": records,
                     "preview_b64": preview_b64, "video_b64": video_b64,
                     "persons_tracked": len(person_agg),
-                    "compliance": compliance_summary,
+                    "compliance": compliance_summary if compliance_summary else None,
                 }
                 print(f"[Modal] {model_name} DONE: {total_dets} dets, video={len(video_b64)/1024:.0f}KB")
 
