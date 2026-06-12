@@ -221,7 +221,7 @@ def detect_http(item: dict):
             3: [KP_L_ANKLE, KP_R_ANKLE],            # boots → feet
             4: [KP_L_EYE, KP_R_EYE],                # goggles → eyes
         }
-        PROXIMITY_PX = 160  # max pixel distance from keypoint to PPE center
+        PROXIMITY_PX = 250  # max pixel distance from keypoint to PPE center
         POSE_EVERY_N = 3   # run pose on every Nth frame, cache in between
 
         # ── Decode video ─────────────────────────────────────────────
@@ -294,47 +294,26 @@ def detect_http(item: dict):
                         persons, person_kpts = pose_cache
                     last_person_count = len(persons)
 
-                    # ── Person-PPE association (IoU-based, robust across resolutions) ──
+                    # ── Person-PPE association ─────────────────────────
                     per_person = []
                     for pi in range(len(persons)):
                         px1, py1, px2, py2 = map(int, persons[pi])
-                        ph = py2 - py1  # person height
                         status = {}
                         for ppe_id in [0,1,2,3,4]:
                             found = False
                             for di in range(len(boxes)):
                                 if int(cls_ids[di]) != ppe_id: continue
-                                bx1, by1, bx2, by2 = boxes[di]
-                                # IoU between PPE box and person box
-                                ix1 = max(px1, int(bx1)); iy1 = max(py1, int(by1))
-                                ix2 = min(px2, int(bx2)); iy2 = min(py2, int(by2))
-                                iou = 0.0
-                                if ix2 > ix1 and iy2 > iy1:
-                                    overlap = (ix2-ix1)*(iy2-iy1)
-                                    ppe_area = (int(bx2)-int(bx1))*(int(by2)-int(by1))
-                                    if ppe_area > 0:
-                                        iou = overlap / ppe_area
-                                # Accept if > 10% of PPE box overlaps with person
-                                if iou > 0.1:
-                                    # Special: helmet near head vs hand check
-                                    if ppe_id == 0:  # helmet
-                                        bcx = (int(bx1)+int(bx2))/2
-                                        bcy = (int(by1)+int(by2))/2
-                                        head_region = py1 + ph * 0.3
-                                        if bcy > head_region:  # helmet in lower 70% = held, not worn
-                                            found = True  # still counts as detected but we note "held"
-                                        else:
-                                            found = True
-                                    else:
-                                        # For other PPE: check body region matches
-                                        if ppe_id == 3:  # boots → lower 30% of person
-                                            bcx = (int(bx1)+int(bx2))/2
-                                            bcy = (int(by1)+int(by2))/2
-                                            if bcy > py1 + ph * 0.5:  # lower half
-                                                found = True
-                                        else:
-                                            found = True  # vest/gloves/goggles → anywhere on person
-                            # Check baseline negative classes
+                                bcx = (boxes[di][0] + boxes[di][2]) / 2
+                                bcy = (boxes[di][1] + boxes[di][3]) / 2
+                                # Check proximity to relevant keypoints
+                                for kp_idx in PPE2KPS.get(ppe_id, []):
+                                    if kp_idx < len(person_kpts[pi]):
+                                        kx, ky = person_kpts[pi][kp_idx]
+                                        if kx > 0 and ky > 0:
+                                            dist = ((bcx-kx)**2 + (bcy-ky)**2)**0.5
+                                            if dist < PROXIMITY_PX:
+                                                found = True; break
+                                if found: break
                             status[PPE_NAMES[ppe_id]] = found
 
                     # ── Draw detections + pose + compliance ────────────
