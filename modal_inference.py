@@ -43,6 +43,7 @@ MODEL_PATH = "/models"
 
 CLASS_NAMES = {0:"helmet", 1:"gloves", 2:"vest", 3:"boots", 4:"goggles", 5:"none",
                6:"Person", 7:"no_helmet", 8:"no_goggle", 9:"no_gloves", 10:"no_boots"}
+PPE_NAMES = {0:"helmet", 1:"gloves", 2:"vest", 3:"boots", 4:"goggles"}
 SAM_REMAP = {0:6, 1:0, 2:2, 3:1, 4:4, 5:3}
 COLORS = {0:(255,255,0), 1:(255,0,255), 2:(0,165,255), 3:(255,0,0), 4:(0,255,255), 6:(0,255,0)}
 
@@ -202,6 +203,27 @@ def detect_http(item: dict):
         m_base = YOLO(str(b_path))
         m_sam = YOLO(str(s_path))
 
+        # Load YOLO-pose for per-person tracking
+        print("[Modal] Loading YOLO-pose model (5 MB)...")
+        m_pose = YOLO("yolo11n-pose.pt")
+
+        # ── Pose config ───────────────────────────────────────────────
+        # COCO keypoint indices
+        KP_NOSE, KP_L_EYE, KP_R_EYE = 0, 1, 2
+        KP_L_SHOULDER, KP_R_SHOULDER = 5, 6
+        KP_L_WRIST, KP_R_WRIST = 9, 10
+        KP_L_ANKLE, KP_R_ANKLE = 15, 16
+
+        PPE2KPS = {  # PPE class ID → relevant keypoints for proximity check
+            0: [KP_NOSE, KP_L_EYE, KP_R_EYE],      # helmet → head
+            1: [KP_L_WRIST, KP_R_WRIST],            # gloves → hands
+            2: [KP_L_SHOULDER, KP_R_SHOULDER],      # vest → torso
+            3: [KP_L_ANKLE, KP_R_ANKLE],            # boots → feet
+            4: [KP_L_EYE, KP_R_EYE],                # goggles → eyes
+        }
+        PROXIMITY_PX = 160  # max pixel distance from keypoint to PPE center
+        POSE_EVERY_N = 3   # run pose on every Nth frame, cache in between
+
         # ── Decode video ─────────────────────────────────────────────
         video_bytes = base64.b64decode(item["video_b64"])
         vname = item.get("video_name", "video.mp4")
@@ -232,6 +254,10 @@ def detect_http(item: dict):
                 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
                 writer = cv2.VideoWriter(out_video, fourcc, fps, (ow, oh))
 
+                pose_cache = None
+                compliance_records = []
+                last_person_count = 0
+
                 for idx in range(total):
                     ret, frame = cap.read()
                     if not ret: break
@@ -239,37 +265,96 @@ def detect_http(item: dict):
                     preds = model(frame, verbose=False, device=0, imgsz=640)[0]
                     disp = frame.copy()
 
+                    # ── Extract detection results ──────────────────────
+                    boxes, cls_ids, confs = np.array([]), np.array([], dtype=int), np.array([])
                     if preds.boxes is not None:
                         boxes = preds.boxes.xyxy.cpu().numpy()
-                        cls = preds.boxes.cls.cpu().numpy().astype(int)
+                        cls_ids = preds.boxes.cls.cpu().numpy().astype(int)
                         confs = preds.boxes.conf.cpu().numpy()
                         if is_sam:
-                            cls = np.array([SAM_REMAP.get(int(c), int(c)) for c in cls])
+                            cls_ids = np.array([SAM_REMAP.get(int(c), int(c)) for c in cls_ids])
 
-                        for i in range(len(boxes)):
-                            x1,y1,x2,y2 = map(int, boxes[i])
-                            cid = int(cls[i])
-                            color = COLORS.get(cid, (128,128,128))
-                            cv2.rectangle(disp, (x1,y1), (x2,y2), color, 2)
-                            name = CLASS_NAMES.get(cid, f"c{cid}")
-                            cv2.putText(disp, f"{name} {confs[i]:.2f}", (x1,y1-4),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+                    # ── Pose detection (every Nth frame) ───────────────
+                    persons, person_kpts = [], []
+                    if idx % POSE_EVERY_N == 0:
+                        pp = m_pose(frame, verbose=False, device=0, imgsz=640)[0]
+                        if pp.boxes is not None and pp.keypoints is not None:
+                            p_boxes = pp.boxes.xyxy.cpu().numpy()
+                            kpts_all = pp.keypoints.xy.cpu().numpy()
+                            for pi in range(len(p_boxes)):
+                                if float(pp.boxes.conf[pi]) > 0.4:
+                                    persons.append(p_boxes[pi])
+                                    person_kpts.append(kpts_all[pi])
+                        pose_cache = (persons, person_kpts)
+                    elif pose_cache:
+                        persons, person_kpts = pose_cache
+                    last_person_count = len(persons)
 
-                        rec = {"frame":idx, "time":round(idx/fps,2), "detections":int(len(boxes)), "classes":{}}
-                        for cid in cls:
-                            cn = CLASS_NAMES.get(int(cid), f"c{int(cid)}")
-                            rec["classes"][cn] = rec["classes"].get(cn, 0) + 1
-                            class_totals[cn] = class_totals.get(cn, 0) + 1
-                        total_dets += len(boxes)
-                        records.append(rec)
-                    else:
-                        records.append({"frame":idx,"time":round(idx/fps,2),"detections":0,"classes":{}})
-                        # Write raw frame (no detections)
-                        if idx < max_download_frames:
-                            if scale < 1.0:
-                                writer.write(cv2.resize(disp, (ow, oh)))
-                            else:
-                                writer.write(disp)
+                    # ── Person-PPE association ─────────────────────────
+                    per_person = []
+                    for pi in range(len(persons)):
+                        px1, py1, px2, py2 = map(int, persons[pi])
+                        status = {}
+                        for ppe_id in [0,1,2,3,4]:
+                            found = False
+                            for di in range(len(boxes)):
+                                if int(cls_ids[di]) != ppe_id: continue
+                                bcx = (boxes[di][0] + boxes[di][2]) / 2
+                                bcy = (boxes[di][1] + boxes[di][3]) / 2
+                                # Check proximity to relevant keypoints
+                                for kp_idx in PPE2KPS.get(ppe_id, []):
+                                    if kp_idx < len(person_kpts[pi]):
+                                        kx, ky = person_kpts[pi][kp_idx]
+                                        if kx > 0 and ky > 0:
+                                            dist = ((bcx-kx)**2 + (bcy-ky)**2)**0.5
+                                            if dist < PROXIMITY_PX:
+                                                found = True; break
+                                if found: break
+                            # Also check baseline negative classes
+                            neg_match = {7:"helmet",8:"goggles",9:"gloves",10:"boots"}
+                            neg_detected = any(int(cls_ids[di]) in neg_match and
+                                               neg_match[int(cls_ids[di])] == PPE_NAMES[ppe_id] and
+                                               int(cls_ids[di]) > 6
+                                               for di in range(len(boxes)))
+                            status[PPE_NAMES[ppe_id]] = found and not neg_detected
+                        per_person.append({"id": pi+1, "compliance": status})
+
+                    # ── Draw detections + pose + compliance ────────────
+                    # Draw PPE boxes
+                    for i in range(len(boxes)):
+                        x1,y1,x2,y2 = map(int, boxes[i])
+                        cid = int(cls_ids[i])
+                        color = COLORS.get(cid, (128,128,128))
+                        cv2.rectangle(disp, (x1,y1), (x2,y2), color, 2)
+                        name = CLASS_NAMES.get(cid, f"c{cid}")
+                        cv2.putText(disp, f"{name} {confs[i]:.2f}", (x1,y1-4),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+                    # Draw person boxes with compliance overlay
+                    for pi in range(len(persons)):
+                        px1,py1,px2,py2 = map(int, persons[pi])
+                        if pi < len(per_person):
+                            ok = sum(per_person[pi]["compliance"].values())
+                            box_color = (0,255,0) if ok == 5 else (0,215,255) if ok >= 3 else (0,0,255)
+                            info = f"P{pi+1}: {ok}/5"
+                        else:
+                            box_color = (0,255,0)
+                            info = f"P{pi+1}"
+                        cv2.rectangle(disp, (px1,py1), (px2,py2), box_color, 3)
+                        cv2.putText(disp, info, (px1,py1-10), cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.55, box_color, 2)
+
+                    # ── Record ─────────────────────────────────────────
+                    rec = {"frame":idx, "time":round(idx/fps,2), "detections":int(len(boxes)),
+                           "classes":{}, "persons": per_person}
+                    for cid in cls_ids:
+                        cn = CLASS_NAMES.get(int(cid), f"c{int(cid)}")
+                        rec["classes"][cn] = rec["classes"].get(cn, 0) + 1
+                        class_totals[cn] = class_totals.get(cn, 0) + 1
+                    total_dets += len(boxes)
+                    records.append(rec)
+                    if per_person:
+                        compliance_records.append(rec)
 
                     # Save first annotated frame as preview JPEG
                     if idx == 0:
@@ -295,11 +380,33 @@ def detect_http(item: dict):
                     if len(data) > 1000:
                         video_b64 = base64.b64encode(data).decode()
 
+                # Aggregate per-person compliance
+                person_agg = {}
+                for rec in compliance_records:
+                    for p in rec.get("persons", []):
+                        pid = p["id"]
+                        if pid not in person_agg:
+                            person_agg[pid] = {item:0 for item in ["helmet","gloves","vest","boots","goggles"]}
+                            person_agg[pid]["_frames"] = 0
+                        person_agg[pid]["_frames"] += 1
+                        for item, present in p["compliance"].items():
+                            if present:
+                                person_agg[pid][item] += 1
+
+                compliance_summary = {}
+                for pid, data in person_agg.items():
+                    total_f = max(data["_frames"], 1)
+                    compliance_summary[f"Person {pid}"] = {
+                        item: f"{round(data[item]/total_f*100, 1)}%"
+                        for item in ["helmet","gloves","vest","boots","goggles"]
+                    }
+
                 results[model_name] = {
                     "total_detections": total_dets, "frames": total,
                     "class_totals": class_totals, "records": records,
-                    "preview_b64": preview_b64,
-                    "video_b64": video_b64,
+                    "preview_b64": preview_b64, "video_b64": video_b64,
+                    "persons_tracked": len(person_agg),
+                    "compliance": compliance_summary,
                 }
                 print(f"[Modal] {model_name} DONE: {total_dets} dets, video={len(video_b64)/1024:.0f}KB")
 

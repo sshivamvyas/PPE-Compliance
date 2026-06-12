@@ -174,6 +174,20 @@ if video_file:
             st.dataframe(pd.DataFrame(rows_s, columns=["PPE Item","Detections","Density","Status"]),
                         hide_index=True, use_container_width=True)
 
+        # ── Per-Person Compliance (YOLO-pose) ───────────────────────────
+        if rb.get("compliance") or rs.get("compliance"):
+            st.markdown("### 🧑 Per-Person Compliance")
+            st.caption("Each person tracked via YOLO-pose keypoints. % = frames where PPE was detected near that person.")
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                st.markdown('<span class="badge badge-base">Baseline</span>', unsafe_allow_html=True)
+                if rb.get("compliance"):
+                    st.dataframe(pd.DataFrame(rb["compliance"]).T, use_container_width=True)
+            with cc2:
+                st.markdown('<span class="badge badge-sam">SAM-Teacher</span>', unsafe_allow_html=True)
+                if rs.get("compliance"):
+                    st.dataframe(pd.DataFrame(rs["compliance"]).T, use_container_width=True)
+
         # ── Side-by-Side Bar Chart ──────────────────────────────────────
         st.markdown("### 📊 Per-Class Comparison")
         all_c = sorted(set(list(rb['class_totals'])+list(rs['class_totals'])))
