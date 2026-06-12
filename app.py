@@ -29,6 +29,7 @@ st.markdown("""
 
 MODAL_URL = "https://sshivamvyas--ppe-compliance-detect-http.modal.run"
 PPE_ITEMS = ["helmet","gloves","vest","boots","goggles"]
+NEGATIVE_MAP = {"no_helmet":"helmet","no_goggle":"goggles","no_gloves":"gloves","no_boots":"boots"}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Header
@@ -139,12 +140,25 @@ if video_file:
         st.markdown("### 🎯 Detection Breakdown: What's Present & Missing")
 
         def build_compliance(model_name, ct, total_frames):
-            """Build a compliance card showing what PPE is detected vs missing."""
             rows = []
+            neg_map = {"no_helmet":"helmet","no_goggle":"goggles","no_gloves":"gloves","no_boots":"boots"}
             for item in PPE_ITEMS:
                 count = ct.get(item, 0)
                 ratio = count / max(total_frames, 1)
-                status = "✅" if ratio > 0.1 else "⚠️ Not detected"
+
+                # Check for negative class (baseline detects missing PPE)
+                neg_key = None
+                for k, v in neg_map.items():
+                    if v == item: neg_key = k
+                neg_count = ct.get(neg_key, 0) if neg_key else 0
+                neg_ratio = neg_count / max(total_frames, 1)
+
+                if neg_ratio > 0.1:
+                    status = f"❌ Missing ({neg_count} frames)"
+                elif ratio > 0.1:
+                    status = "✅ Present"
+                else:
+                    status = "⚠️ No data"
                 rows.append((item.capitalize(), f"{count:,}", f"{ratio:.1f}/frame", status))
             return rows
 

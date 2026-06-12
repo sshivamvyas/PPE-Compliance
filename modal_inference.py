@@ -41,7 +41,8 @@ MODEL_PATH = "/models"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
-CLASS_NAMES = {0:"helmet", 1:"gloves", 2:"vest", 3:"boots", 4:"goggles", 6:"Person"}
+CLASS_NAMES = {0:"helmet", 1:"gloves", 2:"vest", 3:"boots", 4:"goggles", 5:"none",
+               6:"Person", 7:"no_helmet", 8:"no_goggle", 9:"no_gloves", 10:"no_boots"}
 SAM_REMAP = {0:6, 1:0, 2:2, 3:1, 4:4, 5:3}
 COLORS = {0:(255,255,0), 1:(255,0,255), 2:(0,165,255), 3:(255,0,0), 4:(0,255,255), 6:(0,255,0)}
 
